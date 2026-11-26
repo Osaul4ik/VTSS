@@ -49,7 +49,7 @@ typedef struct {
 	uint8_t  kind;
 } BlogRec;
 
-#define RING_N    128                     /* 128 s of records: a power of two   */
+#define RING_N    64                      /* 64 s of records (the worker wakes at least every 5 s) */
 #define RING_MASK (RING_N - 1)
 
 static BlogRec           g_ring[RING_N];
@@ -168,7 +168,7 @@ int blog_title_system(const char *t)
 
 /* ---- output buffer + formatter (worker thread only) ---------------------- */
 
-static char     g_buf[2048];
+static char     g_buf[1024];               /* ~5 s of lines; flushed early if full */
 static int      g_len;
 static SceUID   g_fd = -1;
 static uint32_t g_bytes;

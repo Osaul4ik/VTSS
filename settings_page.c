@@ -124,7 +124,7 @@ static void page_free(void)
 
 /* ---- text (UTF-16 for paf) ----------------------------------------------- */
 typedef unsigned short u16;
-#define TXT_UNITS 384
+#define TXT_UNITS 256                     /* longest text: the status dialog, ~170 */
 static u16 g_txt[4][TXT_UNITS];
 static int g_txt_next;
 
@@ -341,13 +341,6 @@ static SceUID load_hook(const char *path, SceSize args, void *argp,
 		g_h_text = taiHookFunctionImport(&r_text, "SceSystemSettingsCore", 0x4D9A9DD0, 0x19CEFDA7, text_hook);
 	}
 	return ret;
-}
-
-int vtss_in_settings(void)
-{
-	tai_module_info_t ti;
-	ti.size = sizeof(ti);
-	return taiGetModuleInfo("SceSettings", &ti) >= 0;
 }
 
 void vtss_settings_page_install(void)

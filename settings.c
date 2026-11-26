@@ -3,6 +3,7 @@
  */
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
+#include <taihen.h>
 
 #include "vtss.h"
 
@@ -45,4 +46,11 @@ int vtss_settings_save(const VtssSettings *s)
 	int n = sceIoWrite(fd, &f, sizeof(f));
 	sceIoClose(fd);
 	return n == (int)sizeof(f) ? 0 : -1;
+}
+
+int vtss_in_settings(void)
+{
+	tai_module_info_t ti;
+	ti.size = sizeof(ti);
+	return taiGetModuleInfo("SceSettings", &ti) >= 0;   /* the Settings app has SceSettings */
 }

@@ -8,13 +8,18 @@ Based on [ViBeS](https://github.com/Rinnegatamante/ViBeS) by Rinnegatamante.
 
 ## Install
 
-1. Copy `VTSS.suprx` to `ux0:tai/`.
-2. In `ux0:tai/config.txt` add it under `*ALL`:
+1. Copy `VTSS.suprx` and `VTSS_settings.suprx` to `ux0:tai/`.
+2. In `ux0:tai/config.txt` add:
    ```
    *ALL
    ux0:tai/VTSS.suprx
+   *NPXS10015
+   ux0:tai/VTSS_settings.suprx
    ```
+   If `*ALL` or `*NPXS10015` is already there, put the line under it instead.
 3. Reboot.
+
+`VTSS.suprx` is the overlay; `VTSS_settings.suprx` is only the page in the Settings app, so games don't carry its code.
 
 For commercial games [ioplus](https://github.com/CelesteBlue-dev/PSVita-RE-tools/blob/master/ioPlus/ioPlus-0.1/release/ioplus.skprx) or [rePatch reLoaded](https://github.com/SonicMastr/rePatch-reLoaded) is required. Homebrews need nothing extra.
 

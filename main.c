@@ -4,7 +4,6 @@
 #include <psp2/kernel/clib.h>
 #include "renderer.h"
 #include "benchlog.h"
-#include "settings_page.h"
 #include "vtss.h"
 
 /*
@@ -57,9 +56,6 @@ static uint8_t fr_ly[FRAMERATES_NUM * 2]; // 30 - fps / 2
 
 // Log: frametime min/max of the current one-second window (us)
 static uint32_t win_ft_min = 0xFFFFFFFF, win_ft_max = 0;
-
-// 0: overlay in an app, 1: the Settings page only
-static int in_settings = 0;
 
 // Cached strings
 static char fps_str[48];
@@ -330,12 +326,9 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 
 void _start() __attribute__ ((weak, alias ("module_start")));
 int module_start(SceSize argc, const void *args) {
-	// Settings app: only the VTSS page (Settings > Devices > VTSS), no overlay
-	if (vtss_in_settings()) {
-		in_settings = 1;
-		vtss_settings_page_install();
-		return SCE_KERNEL_START_SUCCESS;
-	}
+	// Settings app: the page is VTSS_settings.suprx's job, nothing to do here
+	if (vtss_in_settings())
+		return SCE_KERNEL_START_NO_RESIDENT;
 
 	// VTSS Enable off: unloaded right away (one small file read, nothing kept)
 	VtssSettings set;
@@ -387,11 +380,6 @@ int module_start(SceSize argc, const void *args) {
 }
 
 int module_stop(SceSize argc, const void *args) {
-	if (in_settings) {
-		vtss_settings_page_release();
-		return SCE_KERNEL_STOP_SUCCESS;
-	}
-
 	// Freeing hook
 	if (hook >= 0)
 		taiHookRelease(hook, display_ref);

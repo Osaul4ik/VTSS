@@ -32,12 +32,17 @@ link_directories(
   ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# Hot path (display hook, drawing): -O3. The worker thread and the Settings
+# page are not hot: -Os (benchlog.c is ~6x smaller than at -O3).
+set_source_files_properties(benchlog.c settings.c settings_page.c settings_app.c
+  PROPERTIES COMPILE_FLAGS "-Os")
+
+# VTSS.suprx - the overlay, log and CPU stats (*ALL)
 add_executable(VTSS
   main.c
   renderer.c
   benchlog.c
   settings.c
-  settings_page.c
 )
 
 target_link_libraries(VTSS
@@ -47,12 +52,11 @@ target_link_libraries(VTSS
   SceAppMgr_stub_weak
   SceKernelThreadMgr_stub
   SceRtc_stub
-  SceSysmem_stub
   SceDisplay_stub
   SceCtrl_stub
+  ScePower_stub
   k
   gcc
-  ScePower_stub
 )
 
 set_target_properties(VTSS
@@ -61,4 +65,28 @@ set_target_properties(VTSS
 
 vita_create_self(VTSS.suprx VTSS
   CONFIG ${CMAKE_SOURCE_DIR}/VTSS.yml
+)
+
+# VTSS_settings.suprx - the page in the Settings app only (*NPXS10015)
+add_executable(VTSS_settings
+  settings_app.c
+  settings_page.c
+  settings.c
+)
+
+target_link_libraries(VTSS_settings
+  taihen_stub
+  SceLibKernel_stub
+  SceIofilemgr_stub
+  SceSysmem_stub
+  k
+  gcc
+)
+
+set_target_properties(VTSS_settings
+  PROPERTIES LINK_FLAGS "-nostdlib"
+)
+
+vita_create_self(VTSS_settings.suprx VTSS_settings
+  CONFIG ${CMAKE_SOURCE_DIR}/VTSS_settings.yml
 )

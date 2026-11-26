@@ -1,11 +1,12 @@
 /*
  * vtss.h - VTSS shared definitions.
  *
- * One module, VTSS.suprx, listed under *ALL in config.txt:
- *   - in the Settings app (NPXS10015) it only adds the VTSS page under
- *     Settings > Devices (settings_page.c);
- *   - in any other app it reads settings.bin first: VTSS Enable off -> it
- *     returns SCE_KERNEL_START_NO_RESIDENT and is unloaded at once (one small
+ * Two modules:
+ *   - VTSS_settings.suprx under *NPXS10015: only the VTSS page under
+ *     Settings > Devices (settings_page.c, settings_app.c). Nowhere else.
+ *   - VTSS.suprx under *ALL: the overlay. In the Settings app it unloads
+ *     itself at once (SCE_KERNEL_START_NO_RESIDENT). In any other app it reads
+ *     settings.bin first: VTSS Enable off -> unloaded at once too (one small
  *     file read, no hook, no thread, no memory kept);
  *     on -> the overlay, and the worker thread only when Log to file or
  *     CPU stats is on.
@@ -39,5 +40,7 @@ typedef struct {
 void vtss_settings_load(VtssSettings *s);
 /* Writes settings.bin (Settings app only, on a change). 0 or <0. */
 int  vtss_settings_save(const VtssSettings *s);
+/* 1: this process is the Settings app (NPXS10015). */
+int  vtss_in_settings(void);
 
 #endif
