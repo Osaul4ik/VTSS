@@ -17,6 +17,7 @@
  * The page:  VTSS Enable  (toggle)
  *            Status       (button: Loaded / Not loaded, details in its dialog)
  *            Log to file  (toggle)
+ *            CPU stats    (toggle)
  *
  * All hooks are import hooks (passthrough): if anything does not match, the
  * page simply does not appear. Other plugins' pages on the Devices page
@@ -72,6 +73,8 @@ static const char X_PAGE[] =
 	"hint=\"vtss_h_status\" success_dialog_message=\"vtss_d_status\"/>"
 	"<toggle_switch id=\"vtss_log\" title=\"vtss_t_log\" icon=\"tex_spanner\" "
 	"hint=\"vtss_h_log\" key=\"" CAT "/log\"/>"
+	"<toggle_switch id=\"vtss_cpu\" title=\"vtss_t_cpu\" icon=\"tex_spanner\" "
+	"hint=\"vtss_h_cpu\" key=\"" CAT "/cpu\"/>"
 	"</setting_list>";
 #define X_LEN ((int)sizeof(X_PAGE) - 1)
 
@@ -151,12 +154,18 @@ static const u16 *status_hint(void)
 
 static const u16 *status_dialog(void)
 {
+	static const char *const loaded[4] = {
+		"Status: Loaded\nLog to file: Off\nCPU stats: Off\n\n"
+		"Changes apply to games started after them.",
+		"Status: Loaded\nLog to file: On\nCPU stats: Off\n\nLogs: ux0:data/VTSS/<TITLEID>.log\n\n"
+		"Changes apply to games started after them.",
+		"Status: Loaded\nLog to file: Off\nCPU stats: On\n\n"
+		"Changes apply to games started after them.",
+		"Status: Loaded\nLog to file: On\nCPU stats: On\n\nLogs: ux0:data/VTSS/<TITLEID>.log\n\n"
+		"Changes apply to games started after them.",
+	};
 	if (g_set.enable)
-		return text(g_set.log
-			? "Status: Loaded\nLog to file: On\n\nLogs: ux0:data/VTSS/<TITLEID>.log\n\n"
-			  "Changes apply to games started after them."
-			: "Status: Loaded\nLog to file: Off\n\n"
-			  "Changes apply to games started after them.");
+		return text(loaded[(g_set.log ? 1 : 0) | (g_set.cpu ? 2 : 0)]);
 	return text("Status: Not loaded\n\nVTSS is unloaded right at start in every app "
 	            "(almost no memory or CPU).\n\nChanges apply to games started after them.");
 }
@@ -173,6 +182,8 @@ static const u16 *page_text(const char *id)
 	if (s_eq(id, "vtss_d_status")) return status_dialog();
 	if (s_eq(id, "vtss_t_log"))    return text("Log to file");
 	if (s_eq(id, "vtss_h_log"))    return text("FPS and frametime of each game to ux0:data/VTSS/<TITLEID>.log");
+	if (s_eq(id, "vtss_t_cpu"))    return text("CPU stats");
+	if (s_eq(id, "vtss_h_cpu"))    return text("Load of each CPU core and the CPU clock, once a second, on the overlay and in the log.");
 	return 0;
 }
 
@@ -189,6 +200,7 @@ static uint8_t *key_ptr(const char *name)
 	if (!name) return 0;
 	if (s_eq(name, "enable")) return &g_set.enable;
 	if (s_eq(name, "log"))    return &g_set.log;
+	if (s_eq(name, "cpu"))    return &g_set.cpu;
 	return 0;
 }
 

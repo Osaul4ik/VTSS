@@ -25,6 +25,7 @@ For commercial games [ioplus](https://github.com/CelesteBlue-dev/PSVita-RE-tools
 - **VTSS Enable** - off: VTSS is not loaded anywhere (it unloads itself right at start, almost no memory or CPU used).
 - **Status** - Loaded / Not loaded. Press it for details.
 - **Log to file** - writes each game's results to `ux0:data/VTSS/<TITLEID>.log`.
+- **CPU stats** - load of each CPU core (0-2 for games, 3 for the system) and the CPU clock, once a second, on the overlay and in the log.
 
 Changes apply to games started after them.
 
@@ -44,8 +45,9 @@ Changes apply to games started after them.
 # sum minute section=1 time=60s frames=1782 fps avg=29.6 min=26.9 max=30.0 | ft avg=33.76 min=31.80 max=49.10 ms
 ```
 
-- One line per second: time, FPS, average / min / max frametime.
-- `# sum` every minute and on START + RIGHT.
+- One line per second: time, FPS, average / min / max frametime (with CPU stats: load of cores 0-3 in %).
+- `# cpu` shows the CPU clock when it changes.
+- `# sum` every minute and on START + RIGHT (with CPU stats: average load per core).
 - `# pause` marks a gap of 3 s or more (suspend, loading); it is left out of the summary.
 - Over 256 KiB the file moves to `<TITLEID>.old.log` and a new one starts.
 - The log is written every 5 s, so the last few seconds before closing the game may be missing.

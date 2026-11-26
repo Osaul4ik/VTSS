@@ -12,7 +12,7 @@ static void defaults(VtssSettings *s)
 	s->version = VTSS_VERSION;
 	s->enable = VTSS_DEF_ENABLE;
 	s->log = VTSS_DEF_LOG;
-	s->reserved = 0;
+	s->cpu = VTSS_DEF_CPU;
 }
 
 void vtss_settings_load(VtssSettings *s)
@@ -26,7 +26,7 @@ void vtss_settings_load(VtssSettings *s)
 	int n = sceIoRead(fd, &f, sizeof(f));
 	sceIoClose(fd);
 	if (n != (int)sizeof(f) || f.magic != VTSS_MAGIC || f.version != VTSS_VERSION ||
-	    f.enable > 1 || f.log > 1)
+	    f.enable > 1 || f.log > 1 || f.cpu > 1)
 		return;                           /* not ours / old: defaults            */
 	*s = f;
 }
@@ -37,7 +37,6 @@ int vtss_settings_save(const VtssSettings *s)
 
 	f.magic = VTSS_MAGIC;
 	f.version = VTSS_VERSION;
-	f.reserved = 0;
 	sceIoMkdir("ux0:data", 0777);
 	sceIoMkdir(VTSS_DIR, 0777);
 	SceUID fd = sceIoOpen(VTSS_SETTINGS_PATH, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);

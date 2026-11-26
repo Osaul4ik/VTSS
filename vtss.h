@@ -7,7 +7,8 @@
  *   - in any other app it reads settings.bin first: VTSS Enable off -> it
  *     returns SCE_KERNEL_START_NO_RESIDENT and is unloaded at once (one small
  *     file read, no hook, no thread, no memory kept);
- *     on -> the overlay, and the log thread only when Log to file is on.
+ *     on -> the overlay, and the worker thread only when Log to file or
+ *     CPU stats is on.
  */
 #ifndef _VTSS_H_
 #define _VTSS_H_
@@ -25,12 +26,13 @@ typedef struct {
 	uint8_t  version;
 	uint8_t  enable;                      /* 0: not loaded in apps              */
 	uint8_t  log;                         /* 1: log to file                     */
-	uint8_t  reserved;
+	uint8_t  cpu;                         /* 1: CPU stats (overlay + log)       */
 } VtssSettings;
 
-/* Defaults: enabled, no log file. */
+/* Defaults: enabled, no log file, no CPU stats. */
 #define VTSS_DEF_ENABLE 1
 #define VTSS_DEF_LOG    0
+#define VTSS_DEF_CPU    0
 
 /* Reads settings.bin; a missing or non-matching file gives the defaults
  * (no compatibility layer). */
