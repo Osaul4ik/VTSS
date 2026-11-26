@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.10)
 
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   if(DEFINED ENV{VITASDK})
@@ -10,6 +10,17 @@ endif()
 
 project(ViBeS)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
+
+# Build id written into the log header (CI passes it; else from git)
+if(NOT DEFINED VIBES_BUILD)
+  execute_process(COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE VIBES_BUILD OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(NOT VIBES_BUILD)
+    set(VIBES_BUILD "dev")
+  endif()
+endif()
+add_definitions(-DVIBES_BUILD="${VIBES_BUILD}")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O3 -std=gnu99")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fno-rtti -fno-exceptions")
@@ -24,6 +35,7 @@ link_directories(
 add_executable(ViBeS
   main.c
   renderer.c
+  benchlog.c
 )
 
 target_link_libraries(ViBeS
@@ -31,6 +43,8 @@ target_link_libraries(ViBeS
   SceLibKernel_stub_weak
   SceIofilemgr_stub
   SceAppMgr_stub_weak
+  SceKernelThreadMgr_stub
+  SceRtc_stub
   SceDisplay_stub
   SceCtrl_stub
   k

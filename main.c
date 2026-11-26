@@ -2,6 +2,7 @@
 #include <taihen.h>
 #include <string.h>
 #include "renderer.h"
+#include "benchlog.h"
 
 #define FPS_TIMER_TICK    1000000
 #define FRAMETIMES_NUM 360
@@ -32,6 +33,25 @@ SceCtrlData pad;
 uint32_t oldpad = 0;
 char config_path[256];
 
+// Log: frametime min/max of the current one-second window (us), START+UP toggle
+uint32_t win_ft_min = 0xFFFFFFFF, win_ft_max = 0;
+int log_on = 1;
+int log_msg_frames = 0;
+#define LOG_MSG_FRAMES 120
+
+static void save_config(void) {
+	if (!config_path[0])
+		return;
+	if (blog_save_cfg(mode_ui, log_on) == 0) // the log thread writes it, not the display hook
+		return;
+	int cfg[2] = { mode_ui, log_on };
+	SceUID fd = sceIoOpen(config_path, SCE_O_TRUNC | SCE_O_CREAT | SCE_O_WRONLY, 0777);
+	if (fd >= 0) {
+		sceIoWrite(fd, cfg, sizeof(cfg));
+		sceIoClose(fd);
+	}
+}
+
 #define FRAMETIME_CHART_Y 15
 #define FRAMETIME_BIG_CHART_Y 25
 int calc_y_frametime_big(float ftime) {
@@ -57,17 +77,20 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	sceCtrlPeekBufferPositive(0, &pad, 1);
 	if (pad.buttons & SCE_CTRL_START && (pad.buttons & SCE_CTRL_LEFT && !(oldpad & SCE_CTRL_LEFT))) {
 		mode_ui = (mode_ui + 1) % NUM_MODES;
-		SceUID fd = sceIoOpen(config_path, SCE_O_TRUNC | SCE_O_CREAT | SCE_O_WRONLY, 0777);
-		if (fd > 0) {
-			sceIoWrite(fd, &mode_ui, sizeof(int));
-			sceIoClose(fd);
-		}
+		save_config();
+	}
+	if (pad.buttons & SCE_CTRL_START && (pad.buttons & SCE_CTRL_UP && !(oldpad & SCE_CTRL_UP)) && blog_active()) {
+		log_on = !log_on;
+		blog_set_on(log_on);
+		save_config();
+		log_msg_frames = LOG_MSG_FRAMES;
 	}
 	if (pad.buttons & SCE_CTRL_START && (pad.buttons & SCE_CTRL_RIGHT && !(oldpad & SCE_CTRL_RIGHT))) {
 		max_frametime = 0.0f;
 		min_frametime = 999.0f;
 		max_fps = 0;
 		min_fps = 9999;
+		blog_reset();
 	}
 	oldpad = pad.buttons;
 	framecounter++;
@@ -78,6 +101,10 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 		tick = new_frame_tick;
 	else {
 		if ((new_frame_tick - tick) > FPS_TIMER_TICK) {
+			blog_second(frames, new_frame_tick - tick, win_ft_min == 0xFFFFFFFF ? 0 : win_ft_min, win_ft_max,
+				pParam->width, pParam->height);
+			win_ft_min = 0xFFFFFFFF;
+			win_ft_max = 0;
 			framerate_idx = (framerate_idx + 1) % (FRAMERATES_NUM * 2);
 			framerates[framerate_idx] = frames;
 			if (framerates[framerate_idx] > max_fps)
@@ -150,7 +177,12 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	frames++;
 	
 	if (frametime_tick) {
-		frametimes[frametime_idx] = (float)(new_frame_tick - frametime_tick) / 1000;
+		uint32_t ft_us = new_frame_tick - frametime_tick;
+		if (ft_us < win_ft_min)
+			win_ft_min = ft_us;
+		if (ft_us > win_ft_max)
+			win_ft_max = ft_us;
+		frametimes[frametime_idx] = (float)ft_us / 1000;
 		if (frametimes[frametime_idx] < min_frametime)
 			min_frametime = frametimes[frametime_idx];
 		else if (frametimes[frametime_idx] > max_frametime)
@@ -168,6 +200,14 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 		}
 	}
 	frametime_tick = new_frame_tick;
+
+	if (log_msg_frames > 0) {
+		log_msg_frames--;
+		if (pParam->height > 408)
+			drawBigStringF(5, pParam->height - 25, "Log: %s", log_on ? "ON" : "OFF");
+		else
+			drawStringF(5, pParam->height - 12, "Log: %s", log_on ? "ON" : "OFF");
+	}
 
 	int curr_idx = frametime_idx;
 	int previous_idx = curr_idx - 1;
@@ -217,15 +257,26 @@ int module_start(SceSize argc, const void *args) {
 						
 	setTextColor(0x00FFFF00);
 	
-	char titleid[16];
-	sceAppMgrAppParamGetString(0, 12, titleid , 16);
-	sceIoMkdir("ux0:data/benchmark", 0777);
-	sprintf(config_path, "ux0:data/benchmark/%s.cfg", titleid);
-	SceUID fd = sceIoOpen(config_path, SCE_O_RDONLY, 0777);
-	if (fd > 0) {
-		sceIoRead(fd, &mode_ui, sizeof(int));
-		sceIoClose(fd);
+	char titleid[16] = {0};
+	if (sceAppMgrAppParamGetString(0, 12, titleid, sizeof(titleid)) < 0)
+		titleid[0] = 0;
+	titleid[sizeof(titleid) - 1] = 0;
+	if (blog_title_ok(titleid)) { // only a clean TitleID becomes a file name
+		sceIoMkdir(BLOG_DIR, 0777);
+		sprintf(config_path, BLOG_DIR "/%s.cfg", titleid);
+		int cfg[2] = { mode_ui, log_on };
+		SceUID fd = sceIoOpen(config_path, SCE_O_RDONLY, 0777);
+		if (fd >= 0) {
+			int n = sceIoRead(fd, cfg, sizeof(cfg));
+			sceIoClose(fd);
+			if (n >= (int)sizeof(int) && cfg[0] >= 0 && cfg[0] < NUM_MODES)
+				mode_ui = cfg[0];
+			if (n >= (int)sizeof(cfg))
+				log_on = cfg[1] ? 1 : 0;
+		}
 	}
+	// System apps (NPXS*, main) and a bad TitleID: overlay only, no log
+	blog_init(titleid, log_on, config_path[0] ? config_path : NULL);
 						
 	return SCE_KERNEL_START_SUCCESS;
 }
@@ -234,6 +285,7 @@ int module_stop(SceSize argc, const void *args) {
 
 	// Freeing hook
 	taiHookRelease(hook, display_ref);
+	blog_fini();
 
 	return SCE_KERNEL_STOP_SUCCESS;
 	
