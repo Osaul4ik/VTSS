@@ -135,12 +135,13 @@ static void fc_init(void) {
 }
 static void fc_inc(void) {
 	int i = sizeof(fc_dig) - 2;
-	while (i >= fc_start && fc_dig[i] == '9')
+	const int lo = fc_start > 0 ? fc_start : 0; // explicit bound (fc_start is 0..22)
+	while (i >= lo && fc_dig[i] == '9')
 		fc_dig[i--] = '0';
-	if (i >= fc_start)
+	if (i >= lo)
 		fc_dig[i]++;
-	else if (fc_start > 0)
-		fc_dig[--fc_start] = '1';
+	else if (lo > 0)
+		fc_dig[fc_start = lo - 1] = '1';
 }
 
 static void save_config(void) {
