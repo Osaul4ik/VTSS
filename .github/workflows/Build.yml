@@ -1,0 +1,65 @@
+name: build
+
+# Builds VTSS.suprx and VTSS_settings.suprx in the same pinned VitaSDK Docker image vita-memio uses.
+# Every push / PR / manual run uploads the plugin as an artifact; a pushed tag
+# v* also publishes a GitHub release with VTSS-<tag>.zip.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VITASDK_IMAGE: vitasdk/vitasdk@sha256:8227da1b596d981f4513cd9b36bda1e43857f6dae5bcf4312c1cd40167f7d9bb
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build id
+        id: id
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then b="${GITHUB_REF_NAME}"; else b="$(git rev-parse --short HEAD)"; fi
+          echo "build=$b" >> "$GITHUB_OUTPUT"
+
+      - name: Build (pinned VitaSDK image)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src "$VITASDK_IMAGE" sh -c '
+            cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake -DVTSS_BUILD=${{ steps.id.outputs.build }} &&
+            cmake --build build -j$(nproc)'
+          sudo chown -R "$(id -u):$(id -g)" build
+
+      - name: Check the plugins exist and are not empty
+        run: test -s build/VTSS.suprx && test -s build/VTSS_settings.suprx
+
+      - name: SHA-256
+        run: cd build && sha256sum VTSS.suprx VTSS_settings.suprx | tee SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VTSS-${{ steps.id.outputs.build }}
+          path: |
+            build/VTSS.suprx
+            build/VTSS_settings.suprx
+            build/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Release (tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          zip -j -X -9 "VTSS-${GITHUB_REF_NAME}.zip" build/VTSS.suprx build/VTSS_settings.suprx build/SHA256SUMS
+          gh release create "${GITHUB_REF_NAME}" "VTSS-${GITHUB_REF_NAME}.zip" --title "VTSS ${GITHUB_REF_NAME}" --generate-notes

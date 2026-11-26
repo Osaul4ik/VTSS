@@ -1,7 +1,19 @@
 #include <vitasdk.h>
 #include <taihen.h>
 #include <string.h>
+#include <psp2/kernel/clib.h>
 #include "renderer.h"
+#include "benchlog.h"
+#include "vtss.h"
+
+/*
+ * HOT PATH: sceDisplaySetFrameBuf_patched runs once per frame in the game's
+ * render thread. What it does per frame: one time read, buttons every 2nd
+ * frame, a few integer updates, the text and charts of the current mode.
+ * No file I/O, no float formatting, no division in the chart loops (the chart
+ * y of each sample is computed once, when the sample is taken). Strings that
+ * change once a second (FPS, CPU) are rebuilt only then.
+ */
 
 #define FPS_TIMER_TICK    1000000
 #define FRAMETIMES_NUM 360
@@ -16,225 +28,362 @@ enum {
 };
 int mode_ui = STANDARD_UI;
 
-static SceUID hook;
+static SceUID hook = -1;
 static tai_hook_ref_t display_ref;
-uint32_t tick = 0;
-uint32_t frametime_tick = 0;
-uint32_t frames = 0;
-int framerates[FRAMERATES_NUM * 2] = {};
-float frametimes[FRAMETIMES_NUM * 2] = {};
-float max_frametime = 0.0f, min_frametime = 999.0f;
-int max_fps = 0, min_fps = 9999;
-int frametime_idx = FRAMETIMES_NUM;
-int framerate_idx = FRAMERATES_NUM;
-uint64_t framecounter = 0;
-SceCtrlData pad;
-uint32_t oldpad = 0;
+static uint32_t tick = 0;
+static uint32_t frametime_tick = 0;
+static uint32_t frames = 0;
+static uint32_t poll_count = 0;
+static int cur_fps = 0;
+static int max_fps = 0, min_fps = 9999;
+static uint32_t cur_ft_us = 0;
+static uint32_t max_ft_us = 0, min_ft_us = 999000; // shown as 0.00 / 999.00 until set
+static int frametime_idx = FRAMETIMES_NUM;
+static int framerate_idx = FRAMERATES_NUM;
+static SceCtrlData pad;
+static uint32_t oldpad = 0;
 char config_path[256];
 
+// Chart y offsets, computed once per sample (hi: big charts, lo: small)
 #define FRAMETIME_CHART_Y 15
 #define FRAMETIME_BIG_CHART_Y 25
-int calc_y_frametime_big(float ftime) {
-	return FRAMETIME_BIG_CHART_Y + (int)(100 - ftime);
-}
-int calc_y_frametime(float ftime) {
-	return FRAMETIME_CHART_Y + (int)(50 - (ftime / 2));
-}
-
 #define FRAMERATE_BIG_CHART_Y 160
 #define FRAMERATE_CHART_Y 80
-int calc_y_framerate_big(int frate) {
-	return FRAMERATE_BIG_CHART_Y + (int)(60 - frate);
+static uint8_t ft_hy[FRAMETIMES_NUM * 2]; // 100 - ms (ms clamped to 100)
+static uint8_t ft_ly[FRAMETIMES_NUM * 2]; // 50 - ms / 2
+static uint8_t fr_hy[FRAMERATES_NUM * 2]; // 60 - fps (fps clamped to 60)
+static uint8_t fr_ly[FRAMERATES_NUM * 2]; // 30 - fps / 2
+
+// Log: frametime min/max of the current one-second window (us)
+static uint32_t win_ft_min = 0xFFFFFFFF, win_ft_max = 0;
+
+// Cached strings
+static char fps_str[48];
+static int  fps_dirty = 1;
+static char cpu_str[48];
+static uint32_t cpu_seq_shown = 0;
+static int  cpu_on = 0;
+// Frame count as decimal digits, right-aligned, incremented in place
+static char fc_dig[24];
+static int  fc_start;
+
+/* ---- tiny integer formatter (no printf, no floats) ---------------------- */
+static char *p_str(char *p, const char *s) {
+	while (*s)
+		*p++ = *s++;
+	return p;
 }
-int calc_y_framerate(int frate) {
-	return FRAMERATE_CHART_Y + (int)(30 - (frate / 2));
+static char *p_uint(char *p, uint32_t v) {
+	char t[10];
+	int n = 0;
+	do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+	while (n)
+		*p++ = t[--n];
+	return p;
+}
+// microseconds as milliseconds with 2 decimals, rounded (like "%.2f")
+static char *p_ms(char *p, uint32_t us) {
+	uint32_t c = (us + 5) / 10;
+	p = p_uint(p, c / 100);
+	*p++ = '.';
+	c %= 100;
+	*p++ = (char)('0' + c / 10);
+	*p++ = (char)('0' + c % 10);
+	return p;
+}
+
+static void build_fps_str(void) {
+	char *p = p_str(fps_str, "FPS: ");
+	p = p_uint(p, (uint32_t)cur_fps);
+	p = p_str(p, " (Min: ");
+	p = p_uint(p, (uint32_t)min_fps);
+	p = p_str(p, ", Max: ");
+	p = p_uint(p, (uint32_t)max_fps);
+	*p++ = ')';
+	*p = 0;
+	fps_dirty = 0;
+}
+
+static void build_cpu_str(void) {
+	uint8_t load[BLOG_CPU_CORES];
+	uint16_t mhz;
+	uint32_t seq;
+
+	if (!blog_cpu_read(load, &mhz, &seq))
+		return; // none yet or changed meanwhile: keep the old one, retry next frame
+	char *p = p_str(cpu_str, "CPU:");
+	for (int c = 0; c < BLOG_CPU_CORES; c++) {
+		*p++ = ' ';
+		p = p_uint(p, load[c]);
+		*p++ = '%';
+	}
+	*p++ = ' ';
+	p = p_uint(p, mhz);
+	p = p_str(p, " MHz");
+	*p = 0;
+	cpu_seq_shown = seq;
+}
+
+static void fc_init(void) {
+	fc_start = sizeof(fc_dig) - 2;
+	fc_dig[fc_start] = '0';
+	fc_dig[sizeof(fc_dig) - 1] = 0;
+}
+static void fc_inc(void) {
+	int i = sizeof(fc_dig) - 2;
+	const int lo = fc_start > 0 ? fc_start : 0; // explicit bound (fc_start is 0..22)
+	while (i >= lo && fc_dig[i] == '9')
+		fc_dig[i--] = '0';
+	if (i >= lo)
+		fc_dig[i]++;
+	else if (lo > 0)
+		fc_dig[fc_start = lo - 1] = '1';
+}
+
+static void save_config(void) {
+	if (!config_path[0])
+		return;
+	if (blog_save_cfg(mode_ui) == 0) // the worker thread writes it, not the display hook
+		return;
+	sceIoMkdir(VTSS_DIR, 0777); // a button press, not every frame
+	SceUID fd = sceIoOpen(config_path, SCE_O_TRUNC | SCE_O_CREAT | SCE_O_WRONLY, 0777);
+	if (fd >= 0) {
+		sceIoWrite(fd, &mode_ui, sizeof(int));
+		sceIoClose(fd);
+	}
 }
 
 int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	if (!pParam)
 		return TAI_CONTINUE(int, display_ref, pParam, sync);
-	
-	sceCtrlPeekBufferPositive(0, &pad, 1);
-	if (pad.buttons & SCE_CTRL_START && (pad.buttons & SCE_CTRL_LEFT && !(oldpad & SCE_CTRL_LEFT))) {
-		mode_ui = (mode_ui + 1) % NUM_MODES;
-		SceUID fd = sceIoOpen(config_path, SCE_O_TRUNC | SCE_O_CREAT | SCE_O_WRONLY, 0777);
-		if (fd > 0) {
-			sceIoWrite(fd, &mode_ui, sizeof(int));
-			sceIoClose(fd);
+
+	// Buttons every 2nd frame: enough for the combos, one syscall less per frame
+	if (!(poll_count++ & 1)) {
+		sceCtrlPeekBufferPositive(0, &pad, 1);
+		uint32_t pressed = pad.buttons & ~oldpad;
+		if (pad.buttons & SCE_CTRL_START) {
+			if (pressed & SCE_CTRL_LEFT) {
+				mode_ui = (mode_ui + 1) % NUM_MODES;
+				save_config();
+			}
+			if (pressed & SCE_CTRL_RIGHT) {
+				max_ft_us = 0;
+				min_ft_us = 999000;
+				max_fps = 0;
+				min_fps = 9999;
+				fps_dirty = 1;
+				blog_reset();
+			}
 		}
+		oldpad = pad.buttons;
 	}
-	if (pad.buttons & SCE_CTRL_START && (pad.buttons & SCE_CTRL_RIGHT && !(oldpad & SCE_CTRL_RIGHT))) {
-		max_frametime = 0.0f;
-		min_frametime = 999.0f;
-		max_fps = 0;
-		min_fps = 9999;
-	}
-	oldpad = pad.buttons;
-	framecounter++;
-	
-	uint32_t new_frame_tick = sceKernelGetProcessTimeLow();
+	fc_inc();
+
+	const uint32_t now = sceKernelGetProcessTimeLow();
+	const int hi = pParam->height > 408;
+	const int mode = mode_ui;
 	updateFramebuf(pParam);
+
 	if (tick == 0)
-		tick = new_frame_tick;
+		tick = now;
 	else {
-		if ((new_frame_tick - tick) > FPS_TIMER_TICK) {
-			framerate_idx = (framerate_idx + 1) % (FRAMERATES_NUM * 2);
-			framerates[framerate_idx] = frames;
-			if (framerates[framerate_idx] > max_fps)
-				max_fps = framerates[framerate_idx];
-			else if (framerates[framerate_idx] < min_fps)
-				min_fps = framerates[framerate_idx];
+		uint32_t dt = now - tick;
+		if (dt > FPS_TIMER_TICK) {
+			blog_second(frames, dt, win_ft_min == 0xFFFFFFFF ? 0 : win_ft_min, win_ft_max,
+				pParam->width, pParam->height);
+			win_ft_min = 0xFFFFFFFF;
+			win_ft_max = 0;
+			if (++framerate_idx >= FRAMERATES_NUM * 2)
+				framerate_idx = 0;
+			int f = (int)frames;
+			int fc = f > 60 ? 60 : f;
+			fr_hy[framerate_idx] = (uint8_t)(60 - fc);
+			fr_ly[framerate_idx] = (uint8_t)(30 - fc / 2);
+			cur_fps = f;
+			if (f > max_fps)
+				max_fps = f;
+			if (f < min_fps)
+				min_fps = f;
+			fps_dirty = 1;
 			frames = 0;
-			tick = new_frame_tick;
+			tick = now;
 		}
-		
-		if (pParam->height > 408) { // High res
-			switch (mode_ui) {
-			case MINIMAL_UI:
-				drawBigStringF(5, 5, "FPS: %d (Min: %d, Max: %d)", framerates[framerate_idx], min_fps, max_fps);
-				break;
-			case STANDARD_UI:
-			case EXTENDED_UI:
-				drawBigStringF(5, 140, "FPS: %d (Min: %d, Max: %d)", framerates[framerate_idx], min_fps, max_fps);
-				break;
-			default:
-				break;
-			}
-		
-			if (mode_ui == EXTENDED_UI) {
-				int curr_idx = framerate_idx;
-				int previous_idx = curr_idx - 1;
-				int x = 80;
+
+		if (mode != NO_UI) {
+			if (fps_dirty)
+				build_fps_str();
+			if (hi)
+				drawBigString(5, mode == MINIMAL_UI ? 5 : 140, fps_str);
+			else
+				drawString(5, mode == MINIMAL_UI ? 5 : 70, fps_str);
+		}
+
+		if (mode == EXTENDED_UI) {
+			int idx = framerate_idx;
+			if (hi) {
+				int x = 80, cy = FRAMERATE_BIG_CHART_Y + fr_hy[idx];
 				for (int i = 0; i < FRAMERATES_NUM; i++) {
-					if (previous_idx < 0)
-						previous_idx = FRAMERATES_NUM * 2 - 1;
-					int p_frate = framerates[previous_idx] > 60 ? 60 : framerates[previous_idx];
-					int c_frate = framerates[curr_idx] > 60 ? 60 : framerates[curr_idx];
-					drawLine(x - 5, calc_y_framerate_big(p_frate),x, calc_y_framerate_big(c_frate), 0x0000FF00);
+					idx = idx ? idx - 1 : FRAMERATES_NUM * 2 - 1;
+					int py = FRAMERATE_BIG_CHART_Y + fr_hy[idx];
+					drawLine(x - 5, py, x, cy, 0x0000FF00);
 					x -= 5;
-					curr_idx = previous_idx;
-					previous_idx--;
+					cy = py;
 				}
-			}
-		} else { // Low res
-			switch (mode_ui) {
-			case MINIMAL_UI:
-				drawStringF(5, 5, "FPS: %d (Min: %d, Max: %d)", framerates[framerate_idx], min_fps, max_fps);
-				break;
-			case STANDARD_UI:
-			case EXTENDED_UI:
-				drawStringF(5, 70, "FPS: %d (Min: %d, Max: %d)", framerates[framerate_idx], min_fps, max_fps);
-				break;
-			default:
-				break;
-			}
-		
-			if (mode_ui == EXTENDED_UI) {
-				int curr_idx = framerate_idx;
-				int previous_idx = curr_idx - 1;
-				int x = 35;
+			} else {
+				int x = 35, cy = FRAMERATE_CHART_Y + fr_ly[idx];
 				for (int i = 0; i < FRAMERATES_NUM; i++) {
-					if (previous_idx < 0)
-						previous_idx = FRAMERATES_NUM * 2 - 1;
-					int p_frate = framerates[previous_idx] > 60 ? 60 : framerates[previous_idx];
-					int c_frate = framerates[curr_idx] > 60 ? 60 : framerates[curr_idx];
-					drawLine(x - 2, calc_y_framerate(p_frate),x, calc_y_framerate(c_frate), 0x0000FF00);
+					idx = idx ? idx - 1 : FRAMERATES_NUM * 2 - 1;
+					int py = FRAMERATE_CHART_Y + fr_ly[idx];
+					drawLine(x - 2, py, x, cy, 0x0000FF00);
 					x -= 2;
-					curr_idx = previous_idx;
-					previous_idx--;
+					cy = py;
 				}
 			}
 		}
-		
 	}
 	frames++;
-	
-	if (frametime_tick) {
-		frametimes[frametime_idx] = (float)(new_frame_tick - frametime_tick) / 1000;
-		if (frametimes[frametime_idx] < min_frametime)
-			min_frametime = frametimes[frametime_idx];
-		else if (frametimes[frametime_idx] > max_frametime)
-			max_frametime = frametimes[frametime_idx];
-		if (mode_ui >= STANDARD_UI) {
-			if (pParam->height > 408) { // High res
-				drawBigStringF(5, 5, "Frametime: %.2fms (Min: %.2fms, Max: %.2fms)", frametimes[frametime_idx], min_frametime, max_frametime);
-				if (mode_ui == EXTENDED_UI)
-					drawBigStringF(5, 245, "Frame Count: %llu", framecounter);	
-			} else { // Low res
-				drawStringF(5, 5, "Frametime: %.2fms (Min: %.2fms, Max: %.2fms)", frametimes[frametime_idx], min_frametime, max_frametime);
-				if (mode_ui == EXTENDED_UI)
-					drawStringF(5, 115, "Frame Count: %llu", framecounter);
-			}
-		}
-	}
-	frametime_tick = new_frame_tick;
 
-	int curr_idx = frametime_idx;
-	int previous_idx = curr_idx - 1;
-	if (pParam->height > 408) {// High res
-		if (mode_ui >= STANDARD_UI) {
-			int x = 365;
-			for (int i = 0; i < FRAMETIMES_NUM; i++) {
-				if (previous_idx < 0)
-					previous_idx = FRAMETIMES_NUM * 2 - 1;
-				float p_time = frametimes[previous_idx] > 100.0f ? 100.0f : frametimes[previous_idx];
-				float c_time = frametimes[curr_idx] > 100.0f ? 100.0f : frametimes[curr_idx];
-				drawLine(x - 1, calc_y_frametime_big(p_time), x, calc_y_frametime_big(c_time), 0x0000FF00);
-				x--;
-				curr_idx = previous_idx;
-				previous_idx--;
+	if (frametime_tick) {
+		uint32_t ft = now - frametime_tick;
+		if (ft < win_ft_min)
+			win_ft_min = ft;
+		if (ft > win_ft_max)
+			win_ft_max = ft;
+		uint32_t c = 100000 - (ft > 100000 ? 100000 : ft);
+		ft_hy[frametime_idx] = (uint8_t)(c / 1000);
+		ft_ly[frametime_idx] = (uint8_t)(c / 2000);
+		cur_ft_us = ft;
+		if (ft < min_ft_us)
+			min_ft_us = ft;
+		if (ft > max_ft_us)
+			max_ft_us = ft;
+		if (mode >= STANDARD_UI) {
+			char s[64];
+			char *p = p_str(s, "Frametime: ");
+			p = p_ms(p, cur_ft_us);
+			p = p_str(p, "ms (Min: ");
+			p = p_ms(p, min_ft_us);
+			p = p_str(p, "ms, Max: ");
+			p = p_ms(p, max_ft_us);
+			p = p_str(p, "ms)");
+			*p = 0;
+			if (hi) {
+				drawBigString(5, 5, s);
+				if (mode == EXTENDED_UI) {
+					drawBigString(5, 245, "Frame Count: ");
+					drawBigString(5 + 13 * 12, 245, fc_dig + fc_start);
+				}
+			} else {
+				drawString(5, 5, s);
+				if (mode == EXTENDED_UI) {
+					drawString(5, 115, "Frame Count: ");
+					drawString(5 + 13 * 6, 115, fc_dig + fc_start);
+				}
 			}
 		}
-		frametime_idx = (frametime_idx + 1) % (FRAMETIMES_NUM * 2);
-	} else { // Low res
-		if (mode_ui >= STANDARD_UI) {
-			int x = 185;
-			for (int i = 0; i < FRAMETIMES_NUM / 2; i++) {
-				if (previous_idx < 0)
-					previous_idx = FRAMETIMES_NUM - 1;
-				float p_time = frametimes[previous_idx] > 100.0f ? 100.0f : frametimes[previous_idx];
-				float c_time = frametimes[curr_idx] > 100.0f ? 100.0f : frametimes[curr_idx];
-				drawLine(x - 1, calc_y_frametime(p_time), x, calc_y_frametime(c_time), 0x0000FF00);
-				x--;
-				curr_idx = previous_idx;
-				previous_idx--;
-			}
-		}
-		frametime_idx = (frametime_idx + 1) % FRAMETIMES_NUM;
 	}
-	
+	frametime_tick = now;
+
+	// CPU stats line (CPU stats on): rebuilt once a second, under the other text
+	if (cpu_on && mode != NO_UI) {
+		if (blog_cpu_seq() != cpu_seq_shown)
+			build_cpu_str();
+		if (cpu_str[0]) {
+			if (hi)
+				drawBigString(5, mode == MINIMAL_UI ? 27 : mode == STANDARD_UI ? 162 : 267, cpu_str);
+			else
+				drawString(5, mode == MINIMAL_UI ? 17 : mode == STANDARD_UI ? 82 : 127, cpu_str);
+		}
+	}
+
+	if (mode >= STANDARD_UI) {
+		int idx = frametime_idx;
+		if (hi) {
+			int x = 365, cy = FRAMETIME_BIG_CHART_Y + ft_hy[idx];
+			for (int i = 0; i < FRAMETIMES_NUM; i++) {
+				idx = idx ? idx - 1 : FRAMETIMES_NUM * 2 - 1;
+				int py = FRAMETIME_BIG_CHART_Y + ft_hy[idx];
+				drawLine(x - 1, py, x, cy, 0x0000FF00);
+				x--;
+				cy = py;
+			}
+		} else {
+			int x = 185, cy = FRAMETIME_CHART_Y + ft_ly[idx];
+			for (int i = 0; i < FRAMETIMES_NUM / 2; i++) {
+				idx = idx ? idx - 1 : FRAMETIMES_NUM - 1;
+				int py = FRAMETIME_CHART_Y + ft_ly[idx];
+				drawLine(x - 1, py, x, cy, 0x0000FF00);
+				x--;
+				cy = py;
+			}
+		}
+	}
+	if (++frametime_idx >= (hi ? FRAMETIMES_NUM * 2 : FRAMETIMES_NUM))
+		frametime_idx = 0;
+
 	return TAI_CONTINUE(int, display_ref, pParam, sync);
-}	
+}
 
 void _start() __attribute__ ((weak, alias ("module_start")));
 int module_start(SceSize argc, const void *args) {
+	// Settings app: the page is VTSS_settings.suprx's job, nothing to do here
+	if (vtss_in_settings())
+		return SCE_KERNEL_START_NO_RESIDENT;
+
+	// VTSS Enable off: unloaded right away (one small file read, nothing kept)
+	VtssSettings set;
+	vtss_settings_load(&set);
+	if (!set.enable)
+		return SCE_KERNEL_START_NO_RESIDENT;
+
+	char titleid[16] = {0};
+	if (sceAppMgrAppParamGetString(0, 12, titleid, sizeof(titleid)) < 0)
+		titleid[0] = 0;
+	titleid[sizeof(titleid) - 1] = 0;
+	if (blog_title_ok(titleid)) { // only a clean TitleID becomes a file name
+		sceClibSnprintf(config_path, sizeof(config_path), VTSS_DIR "/%s.cfg", titleid);
+		int cfg = mode_ui;
+		SceUID fd = sceIoOpen(config_path, SCE_O_RDONLY, 0777);
+		if (fd >= 0) {
+			if (sceIoRead(fd, &cfg, sizeof(cfg)) == (int)sizeof(cfg) && cfg >= 0 && cfg < NUM_MODES)
+				mode_ui = cfg;
+			sceIoClose(fd);
+		}
+	}
+
+	// Charts start empty, as before (0 ms / 0 fps at the bottom)
+	for (int i = 0; i < FRAMETIMES_NUM * 2; i++) {
+		ft_hy[i] = 100;
+		ft_ly[i] = 50;
+	}
+	for (int i = 0; i < FRAMERATES_NUM * 2; i++) {
+		fr_hy[i] = 60;
+		fr_ly[i] = 30;
+	}
+	fc_init();
+
+	// Worker thread only for Log to file and/or CPU stats (system apps and a
+	// bad TitleID: no log)
+	blog_init(titleid, config_path[0] ? config_path : NULL, set.log, set.cpu);
+	cpu_on = blog_cpu_active();
+
 	// Hooking sceDisplaySetFrameBuf
 	hook = taiHookFunctionImport(&display_ref,
 						TAI_MAIN_MODULE,
 						TAI_ANY_LIBRARY,
 						0x7A410B64,
 						sceDisplaySetFrameBuf_patched);
-						
+
 	setTextColor(0x00FFFF00);
-	
-	char titleid[16];
-	sceAppMgrAppParamGetString(0, 12, titleid , 16);
-	sceIoMkdir("ux0:data/benchmark", 0777);
-	sprintf(config_path, "ux0:data/benchmark/%s.cfg", titleid);
-	SceUID fd = sceIoOpen(config_path, SCE_O_RDONLY, 0777);
-	if (fd > 0) {
-		sceIoRead(fd, &mode_ui, sizeof(int));
-		sceIoClose(fd);
-	}
-						
+
 	return SCE_KERNEL_START_SUCCESS;
 }
 
 int module_stop(SceSize argc, const void *args) {
-
 	// Freeing hook
-	taiHookRelease(hook, display_ref);
+	if (hook >= 0)
+		taiHookRelease(hook, display_ref);
+	blog_fini();
 
 	return SCE_KERNEL_STOP_SUCCESS;
-	
 }

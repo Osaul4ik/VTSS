@@ -18,9 +18,7 @@
 
 #include <psp2/types.h>
 #include <psp2/display.h>
-#include <libk/stdio.h>
-#include <libk/stdarg.h>
-#include <libk/string.h>
+#include <stdint.h>
 #include "font.h"
 
 unsigned int* vram32;
@@ -37,10 +35,12 @@ void setTextColor(uint32_t clr) {
 }
 
 void drawCharacter(int character, int x, int y) {
+    character &= 0xFF; // font has 256 glyphs
     for (int yy = 0; yy < 10; yy++) {
-        uint32_t *screenPos = vram32 + x + (y + yy) * bufferwidth;
-
         uint8_t charPos = font[character * 10 + yy];
+        if (!(charPos & 0xFC))
+            continue; // empty row of the glyph (bits 7..2 are drawn)
+        uint32_t *screenPos = (uint32_t *)vram32 + x + (y + yy) * bufferwidth;
         for (int xx = 7; xx >= 2; xx--) {
 			if ((charPos >> xx) & 1) {
 				*screenPos = color;
@@ -54,12 +54,12 @@ void drawCharacter(int character, int x, int y) {
 }
 
 void drawBigCharacter(int character, int x, int y){
+    character &= 0xFF;
     for (int yy = 0; yy < 10; yy++) {
-        int xDisplacement = x;
-        int yDisplacement = (y + (yy<<1)) * bufferwidth;
-        uint32_t* screenPos = vram32 + xDisplacement + yDisplacement;
-
         uint8_t charPos = font[character * 10 + yy];
+        if (!(charPos & 0xFC))
+            continue; // empty row of the glyph
+        uint32_t* screenPos = (uint32_t *)vram32 + x + (y + (yy<<1)) * bufferwidth;
         for (int xx = 7; xx >= 2; xx--) {
 			if ((charPos >> xx) & 1) {
 				*(screenPos) = color;
@@ -77,66 +77,39 @@ void drawBigCharacter(int character, int x, int y){
 }
 
 void drawString(int x, int y, const char *str) {
-    for (size_t i = 0; i < strlen(str); i++)
-        drawCharacter(str[i], x + i * 6, y);
+	for (; *str; str++, x += 6)
+		drawCharacter(*str, x, y);
 }
 
 void drawBigString(int x, int y, const char *str) {
-    for (size_t i = 0; i < strlen(str); i++)
-        drawBigCharacter(str[i], x + i * 12, y);
+	for (; *str; str++, x += 12)
+		drawBigCharacter(*str, x, y);
 }
 
-void drawStringF(int x, int y, const char *format, ...) {
-	char str[512] = { 0 };
-	va_list va;
-
-	va_start(va, format);
-	sceClibVsnprintf(str, 512, format, va);
-	va_end(va);
-
-	drawString(x, y, str);
-}
-
-void drawBigStringF(int x, int y, const char *format, ...) {
-	char str[512] = { 0 };
-	va_list va;
-
-	va_start(va, format);
-	sceClibVsnprintf(str, 512, format, va);
-	va_end(va);
-
-	drawBigString(x, y, str);
-}
-
-void drawLine(float x, float y, float x2, float y2, uint32_t color) {
-	int inverted = 0;
-	if (y > y2) {
-		float tmp = y;
-		y = y2;
-		y2 = tmp;
-		inverted = 1;
-	}
-	float x_diff = x2 - x;
-	float y_diff = y2 - y;
-	float x_incr, y_incr;
-	if (y_diff > x_diff) {
-		x_incr = x_diff / y_diff;
-		y_incr = 1;
-	} else {
-		y_incr = y_diff / x_diff;
-		x_incr = 1;
-	}
-	while (x < x2 || y < y2) {
-		if (inverted) {
-			uint32_t *screenPos = vram32 + (int)x2 + (int)y * bufferwidth;
-			*screenPos = color;
-			x2 -= x_incr;
-			y += y_incr;
-		} else {
-			uint32_t *screenPos = vram32 + (int)x + (int)y * bufferwidth;
-			*screenPos = color;
-			x += x_incr;
-			y += y_incr;
+/* Integer line with the same pixels as the old float version (truncated
+ * steps along the longer axis, end point excluded; a falling segment is drawn
+ * from its right end), without its float math: the fraction is carried as a
+ * remainder, no division or float per pixel. The charts draw short segments
+ * with x0 < x1. */
+void drawLine(int x0, int y0, int x1, int y1, uint32_t clr) {
+	if (x1 < x0) { int t = x0; x0 = x1; x1 = t; t = y0; y0 = y1; y1 = t; }
+	int inv = 0;
+	if (y0 > y1) { int t = y0; y0 = y1; y1 = t; inv = 1; }
+	const int dx = x1 - x0, dy = y1 - y0, pitch = bufferwidth;
+	uint32_t *row = (uint32_t *)vram32 + y0 * pitch;
+	int q = 0, r = 0;
+	if (dy > dx) {                          /* steep: one pixel per row */
+		for (int k = 0; k < dy; k++) {
+			row[inv ? x1 - q - (r != 0) : x0 + q] = clr;
+			row += pitch;
+			r += dx;
+			if (r >= dy) { r -= dy; q++; }
+		}
+	} else {                                /* flat: one pixel per column */
+		for (int k = 0; k < dx; k++) {
+			row[inv ? x1 - k : x0 + k] = clr;
+			r += dy;
+			if (r >= dx) { r -= dx; q++; row += pitch; }
 		}
 	}
 }
