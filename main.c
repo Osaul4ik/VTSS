@@ -4,6 +4,8 @@
 #include <psp2/kernel/clib.h>
 #include "renderer.h"
 #include "benchlog.h"
+#include "settings_page.h"
+#include "vtss.h"
 
 #define FPS_TIMER_TICK    1000000
 #define FRAMETIMES_NUM 360
@@ -18,7 +20,7 @@ enum {
 };
 int mode_ui = STANDARD_UI;
 
-static SceUID hook;
+static SceUID hook = -1;
 static tai_hook_ref_t display_ref;
 uint32_t tick = 0;
 uint32_t frametime_tick = 0;
@@ -34,21 +36,21 @@ SceCtrlData pad;
 uint32_t oldpad = 0;
 char config_path[256];
 
-// Log: frametime min/max of the current one-second window (us), START+UP toggle
+// Log: frametime min/max of the current one-second window (us)
 uint32_t win_ft_min = 0xFFFFFFFF, win_ft_max = 0;
-int log_on = 1;
-int log_msg_frames = 0;
-#define LOG_MSG_FRAMES 120
+
+// 0: overlay in an app, 1: the Settings page only
+static int in_settings = 0;
 
 static void save_config(void) {
 	if (!config_path[0])
 		return;
-	if (blog_save_cfg(mode_ui, log_on) == 0) // the log thread writes it, not the display hook
+	if (blog_save_cfg(mode_ui) == 0) // the log thread writes it, not the display hook
 		return;
-	int cfg[2] = { mode_ui, log_on };
+	sceIoMkdir(VTSS_DIR, 0777); // a button press, not every frame
 	SceUID fd = sceIoOpen(config_path, SCE_O_TRUNC | SCE_O_CREAT | SCE_O_WRONLY, 0777);
 	if (fd >= 0) {
-		sceIoWrite(fd, cfg, sizeof(cfg));
+		sceIoWrite(fd, &mode_ui, sizeof(int));
 		sceIoClose(fd);
 	}
 }
@@ -79,12 +81,6 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	if (pad.buttons & SCE_CTRL_START && (pad.buttons & SCE_CTRL_LEFT && !(oldpad & SCE_CTRL_LEFT))) {
 		mode_ui = (mode_ui + 1) % NUM_MODES;
 		save_config();
-	}
-	if (pad.buttons & SCE_CTRL_START && (pad.buttons & SCE_CTRL_UP && !(oldpad & SCE_CTRL_UP)) && blog_active()) {
-		log_on = !log_on;
-		blog_set_on(log_on);
-		save_config();
-		log_msg_frames = LOG_MSG_FRAMES;
 	}
 	if (pad.buttons & SCE_CTRL_START && (pad.buttons & SCE_CTRL_RIGHT && !(oldpad & SCE_CTRL_RIGHT))) {
 		max_frametime = 0.0f;
@@ -202,14 +198,6 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	}
 	frametime_tick = new_frame_tick;
 
-	if (log_msg_frames > 0) {
-		log_msg_frames--;
-		if (pParam->height > 408)
-			drawBigStringF(5, pParam->height - 25, "Log: %s", log_on ? "ON" : "OFF");
-		else
-			drawStringF(5, pParam->height - 12, "Log: %s", log_on ? "ON" : "OFF");
-	}
-
 	int curr_idx = frametime_idx;
 	int previous_idx = curr_idx - 1;
 	if (pParam->height > 408) {// High res
@@ -249,45 +237,60 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 
 void _start() __attribute__ ((weak, alias ("module_start")));
 int module_start(SceSize argc, const void *args) {
+	// Settings app: only the VTSS page (Settings > Devices > VTSS), no overlay
+	if (vtss_in_settings()) {
+		in_settings = 1;
+		vtss_settings_page_install();
+		return SCE_KERNEL_START_SUCCESS;
+	}
+
+	// VTSS Enable off: unloaded right away (one small file read, nothing kept)
+	VtssSettings set;
+	vtss_settings_load(&set);
+	if (!set.enable)
+		return SCE_KERNEL_START_NO_RESIDENT;
+
+	char titleid[16] = {0};
+	if (sceAppMgrAppParamGetString(0, 12, titleid, sizeof(titleid)) < 0)
+		titleid[0] = 0;
+	titleid[sizeof(titleid) - 1] = 0;
+	if (blog_title_ok(titleid)) { // only a clean TitleID becomes a file name
+		sceClibSnprintf(config_path, sizeof(config_path), VTSS_DIR "/%s.cfg", titleid);
+		int cfg = mode_ui;
+		SceUID fd = sceIoOpen(config_path, SCE_O_RDONLY, 0777);
+		if (fd >= 0) {
+			if (sceIoRead(fd, &cfg, sizeof(cfg)) == (int)sizeof(cfg) && cfg >= 0 && cfg < NUM_MODES)
+				mode_ui = cfg;
+			sceIoClose(fd);
+		}
+	}
+
+	// Log to file on: the writer thread (system apps and a bad TitleID: no log)
+	if (set.log)
+		blog_init(titleid, config_path[0] ? config_path : NULL);
+
 	// Hooking sceDisplaySetFrameBuf
 	hook = taiHookFunctionImport(&display_ref,
 						TAI_MAIN_MODULE,
 						TAI_ANY_LIBRARY,
 						0x7A410B64,
 						sceDisplaySetFrameBuf_patched);
-						
+
 	setTextColor(0x00FFFF00);
-	
-	char titleid[16] = {0};
-	if (sceAppMgrAppParamGetString(0, 12, titleid, sizeof(titleid)) < 0)
-		titleid[0] = 0;
-	titleid[sizeof(titleid) - 1] = 0;
-	if (blog_title_ok(titleid)) { // only a clean TitleID becomes a file name
-		sceIoMkdir(BLOG_DIR, 0777);
-		sceClibSnprintf(config_path, sizeof(config_path), BLOG_DIR "/%s.cfg", titleid);
-		int cfg[2] = { mode_ui, log_on };
-		SceUID fd = sceIoOpen(config_path, SCE_O_RDONLY, 0777);
-		if (fd >= 0) {
-			int n = sceIoRead(fd, cfg, sizeof(cfg));
-			sceIoClose(fd);
-			if (n >= (int)sizeof(int) && cfg[0] >= 0 && cfg[0] < NUM_MODES)
-				mode_ui = cfg[0];
-			if (n >= (int)sizeof(cfg))
-				log_on = cfg[1] ? 1 : 0;
-		}
-	}
-	// System apps (NPXS*, main) and a bad TitleID: overlay only, no log
-	blog_init(titleid, log_on, config_path[0] ? config_path : NULL);
-						
+
 	return SCE_KERNEL_START_SUCCESS;
 }
 
 int module_stop(SceSize argc, const void *args) {
+	if (in_settings) {
+		vtss_settings_page_release();
+		return SCE_KERNEL_STOP_SUCCESS;
+	}
 
 	// Freeing hook
-	taiHookRelease(hook, display_ref);
+	if (hook >= 0)
+		taiHookRelease(hook, display_ref);
 	blog_fini();
 
 	return SCE_KERNEL_STOP_SUCCESS;
-	
 }

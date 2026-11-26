@@ -1,8 +1,8 @@
 name: build
 
-# Builds ViBeS.suprx in the same pinned VitaSDK Docker image vita-memio uses.
+# Builds VTSS.suprx in the same pinned VitaSDK Docker image vita-memio uses.
 # Every push / PR / manual run uploads the plugin as an artifact; a pushed tag
-# v* also publishes a GitHub release with ViBeS-<tag>.zip.
+# v* also publishes a GitHub release with VTSS-<tag>.zip.
 
 on:
   push:
@@ -37,21 +37,21 @@ jobs:
       - name: Build (pinned VitaSDK image)
         run: |
           docker run --rm -v "$PWD":/src -w /src "$VITASDK_IMAGE" sh -c '
-            cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake -DVIBES_BUILD=${{ steps.id.outputs.build }} &&
+            cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake -DVTSS_BUILD=${{ steps.id.outputs.build }} &&
             cmake --build build -j$(nproc)'
           sudo chown -R "$(id -u):$(id -g)" build
 
       - name: Check the plugin exists and is not empty
-        run: test -s build/ViBeS.suprx
+        run: test -s build/VTSS.suprx
 
       - name: SHA-256
-        run: cd build && sha256sum ViBeS.suprx | tee SHA256SUMS
+        run: cd build && sha256sum VTSS.suprx | tee SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ViBeS-${{ steps.id.outputs.build }}
+          name: VTSS-${{ steps.id.outputs.build }}
           path: |
-            build/ViBeS.suprx
+            build/VTSS.suprx
             build/SHA256SUMS
           if-no-files-found: error
 
@@ -60,5 +60,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          zip -j -X -9 "ViBeS-${GITHUB_REF_NAME}.zip" build/ViBeS.suprx build/SHA256SUMS
-          gh release create "${GITHUB_REF_NAME}" "ViBeS-${GITHUB_REF_NAME}.zip" --title "ViBeS ${GITHUB_REF_NAME}" --generate-notes
+          zip -j -X -9 "VTSS-${GITHUB_REF_NAME}.zip" build/VTSS.suprx build/SHA256SUMS
+          gh release create "${GITHUB_REF_NAME}" "VTSS-${GITHUB_REF_NAME}.zip" --title "VTSS ${GITHUB_REF_NAME}" --generate-notes

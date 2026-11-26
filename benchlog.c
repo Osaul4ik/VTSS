@@ -20,9 +20,10 @@
 #include <stdint.h>
 
 #include "benchlog.h"
+#include "vtss.h"
 
-#ifndef VIBES_BUILD
-#define VIBES_BUILD "dev"
+#ifndef VTSS_BUILD
+#define VTSS_BUILD "dev"
 #endif
 
 #define BLOG_THREAD_PRIO   0xA0           /* below the game's threads           */
@@ -50,10 +51,9 @@ static volatile uint32_t g_head;          /* written by the producer only       
 static volatile uint32_t g_tail;          /* written by the consumer only       */
 static volatile uint32_t g_dropped;       /* producer only                      */
 
-static volatile int g_on;                 /* logging on/off                     */
 static volatile int g_stop;
 static volatile int g_cfg_dirty;
-static volatile int g_cfg_mode, g_cfg_log;
+static volatile int g_cfg_mode;
 
 static SceUID g_thid = -1;
 static SceUID g_sema = -1;
@@ -77,7 +77,7 @@ static void push(const BlogRec *r)
 void blog_second(uint32_t frames, uint32_t dt_us, uint32_t ft_min_us,
                  uint32_t ft_max_us, uint16_t width, uint16_t height)
 {
-	if (!g_on || g_thid < 0)
+	if (g_thid < 0)
 		return;
 	BlogRec r;
 	r.kind = REC_SEC;
@@ -92,23 +92,19 @@ void blog_second(uint32_t frames, uint32_t dt_us, uint32_t ft_min_us,
 
 void blog_reset(void)
 {
-	if (!g_on || g_thid < 0)
+	if (g_thid < 0)
 		return;
 	BlogRec r = {0};
 	r.kind = REC_RESET;
 	push(&r);
 }
 
-void blog_set_on(int on) { g_on = on ? 1 : 0; }
-int  blog_is_on(void)    { return g_on; }
-int  blog_active(void)   { return g_thid >= 0; }
 
-int blog_save_cfg(int mode_ui, int log_on)
+int blog_save_cfg(int mode_ui)
 {
 	if (g_thid < 0)
 		return -1;
 	g_cfg_mode = mode_ui;
-	g_cfg_log = log_on;
 	__sync_synchronize();
 	g_cfg_dirty = 1;
 	sceKernelSignalSema(g_sema, 1);        /* a button press, not every frame: wake the writer */
@@ -193,7 +189,7 @@ static void file_open(int trunc)
 {
 	if (g_file_bad || g_fd >= 0)
 		return;
-	sceIoMkdir(BLOG_DIR, 0777);
+	sceIoMkdir(VTSS_DIR, 0777);
 	g_fd = sceIoOpen(g_path, SCE_O_WRONLY | SCE_O_CREAT | (trunc ? SCE_O_TRUNC : SCE_O_APPEND), 0666);
 	if (g_fd < 0) {
 		g_file_bad = 1;
@@ -232,7 +228,7 @@ static void flush(void)
 		/* the new file starts with its own header (the buffer holds data lines) */
 		char hdr[128];
 		int n = 0;
-		const char *parts[] = { "# ViBeS ", VIBES_BUILD, " | ", g_title,
+		const char *parts[] = { "# VTSS ", VTSS_BUILD, " | ", g_title,
 		                        " | continued (older lines in .old.log)\n", COLUMNS };
 		for (unsigned i = 0; i < sizeof(parts) / sizeof(parts[0]); i++)
 			for (const char *c = parts[i]; *c && n < (int)sizeof(hdr); c++)
@@ -262,7 +258,6 @@ static void need(int n)
 static uint64_t g_t_us;                   /* session time, sum of windows       */
 static uint16_t g_w, g_h;                 /* resolution last logged             */
 static uint32_t g_dropped_seen;
-static int      g_header_done;
 
 typedef struct {
 	uint32_t secs, frames;
@@ -330,8 +325,8 @@ static void put_header(const char *what)
 	SceDateTime dt;
 
 	need(160);
-	out_str("# ViBeS ");
-	out_str(VIBES_BUILD);
+	out_str("# VTSS ");
+	out_str(VTSS_BUILD);
 	out_str(" | ");
 	out_str(g_title);
 	out_str(" | ");
@@ -416,14 +411,14 @@ static void handle(const BlogRec *r)
 
 static void save_cfg(void)
 {
-	int cfg[2] = { g_cfg_mode, g_cfg_log };
+	int cfg = g_cfg_mode;
 
 	g_cfg_dirty = 0;
 	if (!g_cfg_path)
 		return;
 	SceUID fd = sceIoOpen(g_cfg_path, SCE_O_TRUNC | SCE_O_CREAT | SCE_O_WRONLY, 0777);
 	if (fd >= 0) {
-		sceIoWrite(fd, cfg, sizeof(cfg));
+		sceIoWrite(fd, &cfg, sizeof(cfg));
 		sceIoClose(fd);
 	}
 }
@@ -434,14 +429,10 @@ static void step(void)
 	if (g_cfg_dirty)
 		save_cfg();
 
-	int on = g_on;
-
-	if (on && g_fd < 0 && !g_file_bad) {
+	if (g_fd < 0 && !g_file_bad) {        /* first wake: open, session header */
 		file_open(0);
-		if (g_fd >= 0) {
-			put_header(g_header_done ? "log on" : "start");
-			g_header_done = 1;
-		}
+		if (g_fd >= 0)
+			put_header("start");
 	}
 
 	uint32_t tail = g_tail;
@@ -463,16 +454,6 @@ static void step(void)
 		g_dropped_seen = d;
 	}
 
-	if (!on && g_fd >= 0) {
-		put_sum("log off");
-		need(20);
-		out_str("# log off\n");
-		g_section++;
-		sum_clear();
-		flush();
-		file_close();
-		return;
-	}
 	flush();
 }
 
@@ -504,22 +485,21 @@ static void cpy(char *d, int cap, const char *a, const char *b, const char *c)
 	d[n] = 0;
 }
 
-int blog_init(const char *titleid, int log_on, const char *cfg_path)
+int blog_init(const char *titleid, const char *cfg_path)
 {
 	g_cfg_path = cfg_path;
-	g_on = log_on ? 1 : 0;
 	if (!titleid || !blog_title_ok(titleid) || blog_title_system(titleid))
 		return -1;
 
 	cpy(g_title, sizeof(g_title), titleid, 0, 0);
-	cpy(g_path, sizeof(g_path), BLOG_DIR "/", titleid, ".log");
-	cpy(g_path_old, sizeof(g_path_old), BLOG_DIR "/", titleid, ".old.log");
+	cpy(g_path, sizeof(g_path), VTSS_DIR "/", titleid, ".log");
+	cpy(g_path_old, sizeof(g_path_old), VTSS_DIR "/", titleid, ".old.log");
 	sum_clear();
 
-	g_sema = sceKernelCreateSema("ViBeSLogSema", 0, 0, 1, NULL);
+	g_sema = sceKernelCreateSema("VTSSLogSema", 0, 0, 1, NULL);
 	if (g_sema < 0)
 		return -2;
-	g_thid = sceKernelCreateThread("ViBeSLog", writer, BLOG_THREAD_PRIO,
+	g_thid = sceKernelCreateThread("VTSSLog", writer, BLOG_THREAD_PRIO,
 	                               BLOG_THREAD_STACK, 0, SCE_KERNEL_CPU_MASK_USER_ALL, NULL);
 	if (g_thid < 0) {
 		sceKernelDeleteSema(g_sema);
