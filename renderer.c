@@ -18,6 +18,7 @@
 
 #include <psp2/types.h>
 #include <psp2/display.h>
+#include <psp2/kernel/clib.h>
 #include <libk/stdio.h>
 #include <libk/stdarg.h>
 #include <libk/string.h>

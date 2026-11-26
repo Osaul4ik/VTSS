@@ -1,6 +1,7 @@
 #include <vitasdk.h>
 #include <taihen.h>
 #include <string.h>
+#include <psp2/kernel/clib.h>
 #include "renderer.h"
 #include "benchlog.h"
 
@@ -263,7 +264,7 @@ int module_start(SceSize argc, const void *args) {
 	titleid[sizeof(titleid) - 1] = 0;
 	if (blog_title_ok(titleid)) { // only a clean TitleID becomes a file name
 		sceIoMkdir(BLOG_DIR, 0777);
-		sprintf(config_path, BLOG_DIR "/%s.cfg", titleid);
+		sceClibSnprintf(config_path, sizeof(config_path), BLOG_DIR "/%s.cfg", titleid);
 		int cfg[2] = { mode_ui, log_on };
 		SceUID fd = sceIoOpen(config_path, SCE_O_RDONLY, 0777);
 		if (fd >= 0) {
