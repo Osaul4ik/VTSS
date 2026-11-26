@@ -13,6 +13,11 @@
  * No file I/O, no float formatting, no division in the chart loops (the chart
  * y of each sample is computed once, when the sample is taken). Strings that
  * change once a second (FPS, CPU) are rebuilt only then.
+ *
+ * Log (Log to file on): the frame's frametime goes to the worker as one 32-bit
+ * ring word (blog_frame); a resolution change, START+RIGHT and a VTSS-cost
+ * sample (the hook's own time, read on 1 frame in BLOG_COST_EVERY) are
+ * single words too. Window statistics are the worker's job, not the hook's.
  */
 
 #define FPS_TIMER_TICK    1000000
@@ -54,8 +59,9 @@ static uint8_t ft_ly[FRAMETIMES_NUM * 2]; // 50 - ms / 2
 static uint8_t fr_hy[FRAMERATES_NUM * 2]; // 60 - fps (fps clamped to 60)
 static uint8_t fr_ly[FRAMERATES_NUM * 2]; // 30 - fps / 2
 
-// Log: frametime min/max of the current one-second window (us)
-static uint32_t win_ft_min = 0xFFFFFFFF, win_ft_max = 0;
+// Log (worker): the hook only knows whether it runs and the last resolution
+static int  log_on = 0;
+static uint32_t last_res = 0;
 
 // Cached strings
 static char fps_str[48];
@@ -157,8 +163,12 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	if (!pParam)
 		return TAI_CONTINUE(int, display_ref, pParam, sync);
 
+	// Read first: the frametime and VTSS's own cost both start at the hook's entry
+	const uint32_t now = sceKernelGetProcessTimeLow();
+	const uint32_t nth = poll_count++;
+
 	// Buttons every 2nd frame: enough for the combos, one syscall less per frame
-	if (!(poll_count++ & 1)) {
+	if (!(nth & 1)) {
 		sceCtrlPeekBufferPositive(0, &pad, 1);
 		uint32_t pressed = pad.buttons & ~oldpad;
 		if (pad.buttons & SCE_CTRL_START) {
@@ -172,27 +182,31 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 				max_fps = 0;
 				min_fps = 9999;
 				fps_dirty = 1;
-				blog_reset();
+				if (log_on)
+					blog_reset();
 			}
 		}
 		oldpad = pad.buttons;
 	}
 	fc_inc();
 
-	const uint32_t now = sceKernelGetProcessTimeLow();
 	const int hi = pParam->height > 408;
 	const int mode = mode_ui;
 	updateFramebuf(pParam);
+
+	if (log_on) {
+		const uint32_t res = (pParam->width << 16) | (pParam->height & 0xFFFF);
+		if (res != last_res) {
+			last_res = res;
+			blog_res((uint16_t)pParam->width, (uint16_t)pParam->height);
+		}
+	}
 
 	if (tick == 0)
 		tick = now;
 	else {
 		uint32_t dt = now - tick;
 		if (dt > FPS_TIMER_TICK) {
-			blog_second(frames, dt, win_ft_min == 0xFFFFFFFF ? 0 : win_ft_min, win_ft_max,
-				pParam->width, pParam->height);
-			win_ft_min = 0xFFFFFFFF;
-			win_ft_max = 0;
 			if (++framerate_idx >= FRAMERATES_NUM * 2)
 				framerate_idx = 0;
 			int f = (int)frames;
@@ -245,10 +259,8 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 
 	if (frametime_tick) {
 		uint32_t ft = now - frametime_tick;
-		if (ft < win_ft_min)
-			win_ft_min = ft;
-		if (ft > win_ft_max)
-			win_ft_max = ft;
+		if (log_on)
+			blog_frame(ft);
 		uint32_t c = 100000 - (ft > 100000 ? 100000 : ft);
 		ft_hy[frametime_idx] = (uint8_t)(c / 1000);
 		ft_ly[frametime_idx] = (uint8_t)(c / 2000);
@@ -321,6 +333,11 @@ int sceDisplaySetFrameBuf_patched(const SceDisplayFrameBuf *pParam, int sync) {
 	if (++frametime_idx >= (hi ? FRAMETIMES_NUM * 2 : FRAMETIMES_NUM))
 		frametime_idx = 0;
 
+	// VTSS's own time in this frame (entry to here, not the display call below): the
+	// clock is read a second time on 1 frame in BLOG_COST_EVERY only
+	if (!(nth & (BLOG_COST_EVERY - 1)) && log_on)
+		blog_cost(sceKernelGetProcessTimeLow() - now);
+
 	return TAI_CONTINUE(int, display_ref, pParam, sync);
 }
 
@@ -362,10 +379,17 @@ int module_start(SceSize argc, const void *args) {
 	}
 	fc_init();
 
+	// The game's title for the log header (only read when logging)
+	char name[128] = {0};
+	if (set.log && sceAppMgrAppParamGetString(0, 9, name, sizeof(name)) < 0)
+		name[0] = 0;
+	name[sizeof(name) - 1] = 0;
+
 	// Worker thread only for Log to file and/or CPU stats (system apps and a
 	// bad TitleID: no log)
-	blog_init(titleid, config_path[0] ? config_path : NULL, set.log, set.cpu);
+	blog_init(titleid, name, config_path[0] ? config_path : NULL, set.log, set.cpu);
 	cpu_on = blog_cpu_active();
+	log_on = blog_log_active();
 
 	// Hooking sceDisplaySetFrameBuf
 	hook = taiHookFunctionImport(&display_ref,

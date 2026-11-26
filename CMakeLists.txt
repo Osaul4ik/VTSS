@@ -51,6 +51,7 @@ target_link_libraries(VTSS
   SceIofilemgr_stub
   SceAppMgr_stub_weak
   SceKernelThreadMgr_stub
+  SceSysmem_stub
   SceRtc_stub
   SceDisplay_stub
   SceCtrl_stub

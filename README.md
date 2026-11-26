@@ -43,19 +43,39 @@ Changes apply to games started after them.
 
 ```
 # VTSS v1.0 | PCSB00245 | start | 2026-11-26 12:05:09
-#     t   fps  ft_avg  ft_min  ft_max  (s, ms)
+# game The Simpsons Hit & Run
+# clk cpu=444 bus=222 gpu=222 xbar=166 MHz
+# mem free user=220.0 cdram=12.0 phycont=3.5 MiB
+#     t   fps  ft_avg  ft_min  ft_max  jitter  hitch  (s, ms)
 # res 960x544
-      1  30.0   33.33   31.80   40.10
+      1  30.1   33.25   32.77   33.92    0.34      0
+# hitch 80.12 ms at t=5.8
+      6  28.7   34.87   32.75   80.12    3.62      1
 ...
-# sum minute section=1 time=60s frames=1782 fps avg=29.6 min=26.9 max=30.0 | ft avg=33.76 min=31.80 max=49.10 ms
+# sum minute section=1 time=60s frames=1782
+#   fps    avg=29.8 min=26.4 max=30.2 | low 1%=18.9 0.1%=12.5
+#   ft     avg=33.51 min=32.73 max=80.12 | p50=33.3 p95=33.8 p99=33.9 p99.9=80.1 ms
+#   jitter avg=0.79 ms | hitches=5 pauses=0
+#   mem    free user=217.0 (min 214.0) cdram=12.0 phycont=3.5 MiB
+#   vtss   cost avg=89 max=108 us/frame (1 in 32 frames, n=47)
 ```
 
-- One line per second: time, FPS, average / min / max frametime (with CPU stats: load of cores 0-3 in %).
-- `# cpu` shows the CPU clock when it changes.
-- `# sum` every minute and on START + RIGHT (with CPU stats: average load per core).
-- `# pause` marks a gap of 3 s or more (suspend, loading); it is left out of the summary.
-- Over 256 KiB the file moves to `<TITLEID>.old.log` and a new one starts.
+- The header has the game's title, the CPU / BUS / GPU / XBAR clocks (an overclock shows here) and the free memory. A `# clk ... at t=` line is added each time a clock changes (noticed within a second).
+- One line per second: time, FPS, average / min / max frametime, jitter and the number of hitches (with CPU stats: load of cores 0-3 in %). A second's average hides stutter, so look at ft_max, jitter and hitch too.
+- Jitter: the average difference between one frame and the one before.
+- Hitch: a frame longer than 175% of the running average frametime (the last ~16 frames) and at least 25 ms, e.g. one missed vsync. `# hitch` lines give the time of each (at most 4 per second; the hitch column counts them all).
+- `# sum` every minute, on START + RIGHT (a new section starts) and when the game closes. It covers the section so far, from a histogram of the frametimes in 0.1 ms steps:
+  - `low 1%` / `0.1%`: the average FPS of the slowest 1% / 0.1% of the frames.
+  - `p50` ... `p99.9`: frametime percentiles, 0.1 ms resolution (`>200.0`: beyond the histogram).
+  - jitter, hitches, pauses.
+  - `cpu` (with CPU stats): average load per core.
+  - `mem`: free memory of the game (now, and the lowest in the section).
+  - `vtss`: VTSS's own time per frame (the overlay and log hook, not the display call), measured on 1 frame in 32.
+- `# res` shows the resolution when it changes.
+- `# pause` marks a frame of 3 s or more (suspend, loading); it is left out of every statistic.
+- Past 256 KiB the file moves to `<TITLEID>.old.log` and a new one starts (checked after each write).
 - The log is written every 5 s, so the last few seconds before closing the game may be missing.
+- Memory: the log's buffers are one 28 KiB block, allocated only while Log to file is on. Off: nothing.
 - System apps (NPXS...) are not logged.
 
 ## Credits
